@@ -1,0 +1,35 @@
+# Secrets & local env — JANGAN pernah di-commit
+.env
+.env.local
+.env.*.local
+*.env
+
+# Go
+/backend/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Node / frontend (nanti)
+/frontend/node_modules/
+/frontend/dist/
+/frontend/playwright-report/
+/frontend/test-results/
+
+# Build artifacts & junk
+*.zip
+tsconfig.tsbuildinfo
+scripts-test-tmp/
+x.ps1
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Postman / Bruno exports berisi token lokal
+/postman/*.local.json
+/postman/*.environment.json

@@ -1,0 +1,111 @@
+{
+  "areas_inspected": [
+    "frontend/src/api.ts (API client, auth refresh flow, error handling)",
+    "frontend/src/auth.tsx (auth context, token management, single-flight refresh)",
+    "frontend/src/App.tsx (routing, providers)",
+    "frontend/src/main.tsx (entry, theme init)",
+    "frontend/src/theme.ts (theme utilities)",
+    "frontend/src/fx.ts (pointer glow effect)",
+    "frontend/src/Login.tsx (login page, theme toggle)",
+    "frontend/src/index.css (global styles, select-proxy)",
+    "frontend/src/components/Layout.tsx (sidebar, header, CommandPalette, NotificationDropdown, ThemeToggle integration, hardcoded notifications)",
+    "frontend/src/components/ui.tsx (787 lines: Button, Input, Select, Modal, Form, Table, CommandPalette, NotificationDropdown, ThemeToggle, StatusBadge, etc.)",
+    "frontend/src/components/Icons.tsx",
+    "frontend/src/pages/Dashboard.tsx (dashboard data fetching, rendering)",
+    "frontend/src/pages/Assets.tsx (asset CRUD, movements, forms)",
+    "frontend/src/pages/Maintenance.tsx (maintenance tickets, transitions)",
+    "frontend/src/pages/Master.tsx (categories, locations CRUD)",
+    "frontend/src/pages/Users.tsx (user management)",
+    "frontend/src/pages/Sessions.tsx (session management)",
+    "backend/internal/api/handlers.go (all HTTP handlers)",
+    "backend/internal/api/cookie.go (refresh cookie settings)",
+    "backend/internal/server/routes.go (route registration)",
+    "backend/internal/model/model.go (all Go structs, JSON tags, enums)",
+    "backend/internal/service/auth.go (login, refresh, logout, rotation)",
+    "backend/internal/service/biz.go (asset, maintenance, master, user, dashboard services)",
+    "backend/internal/service/maintenance.go (maintenance transitions)",
+    "backend/internal/repo/*.go (repository layer for field mappings)"
+  ],
+  "findings": [
+    {
+      "severity": "high",
+      "file_line": "frontend/src/components/ui.tsx:168-297 (Select component) & frontend/src/pages/Assets.tsx:230-235 (location Select required)",
+      "title": "Required Select validation silently fails — user sees no feedback when required location not picked",
+      "why": "Select renders a hidden proxy input (opacity:0, height:1px) with required=true for HTML5 validation. When user submits asset create form without picking a location, the browser blocks submit but shows no validation message because the proxy input is visually hidden. The onSubmit handler never fires, leaving user confused why nothing happens.",
+      "evidence": "ui.tsx lines 1969-1972: .select-proxy { opacity: 0; height: 1px; pointer-events: none; } — browser validates but cannot show UI. Assets.tsx line 232: <Select id=\"f-loc\" required ...> for location on create.",
+      "fix": "Add custom required validation in the form submit handler (check form.location_id && form.category_id) and show inline error, or style .select-proxy to be focusable/visible when invalid (e.g., opacity:0 but position:absolute off-screen, not zero-size)."
+    },
+    {
+      "severity": "high",
+      "file_line": "frontend/src/components/Layout.tsx:111-115",
+      "title": "Hardcoded demo notifications in production Layout — no API integration",
+      "why": "Layout.tsx lines 111-115 define a static notifs array with three fake NotificationItem objects. Comment on line 110 admits: \"Notifikasi (data contoh; ganti dengan API)\". This fake data renders in the NotificationDropdown for all users.",
+      "evidence": "Layout.tsx lines 111-115: const [notifs, setNotifs] = React.useState<NotificationItem[]>([{ id: '1', title: 'Aset baru ditambahkan', ... }]);",
+      "fix": "Replace with real API fetch: add useEffect to load notifications from an endpoint (e.g., GET /api/v1/notifications) and wire markAllRead / onClick to API calls. If endpoint doesn't exist yet, at minimum gate the demo data behind NODE_ENV !== 'production'."
+    },
+    {
+      "severity": "medium",
+      "file_line": "frontend/src/fx.ts:3 (export) & frontend/src/main.tsx:1-30 (no call)",
+      "title": "initPointerGlow() exported but never initialized — soft-glow effect on cards never runs",
+      "why": "fx.ts exports initPointerGlow() which adds a delegated pointermove listener to create a cursor-following glow on .card/.stat/.table-card/.promo elements. main.tsx imports theme.initTheme but does not import or call initPointerGlow(). The effect is completely dead code.",
+      "evidence": "fx.ts lines 3-16: export function initPointerGlow() { ... document.addEventListener('pointermove', ...) } — never invoked. main.tsx only calls initTheme().",
+      "fix": "Call initPointerGlow() in main.tsx after initTheme(), or remove the export if the feature is unwanted."
+    },
+    {
+      "severity": "medium",
+      "file_line": "frontend/src/components/ui.tsx:549-677 (CommandPalette) & frontend/src/components/Layout.tsx:229",
+      "title": "CommandPortal lacks focus trap — Tab can escape the modal dialog",
+      "why": "CommandPalette renders via createPortal into document.body. Its onKeyDown handles Escape/Arrows/Enter but not Tab. Focus can leave the dialog into the page behind, violating ARIA dialog modality. No focus restoration on close either.",
+      "evidence": "ui.tsx lines 595-602: onKeyDown handles Escape, ArrowUp/Down, Home, End, Enter — no Tab handling. Layout.tsx line 229 renders <CommandPalette isOpen={cmdOpen} ... />.",
+      "fix": "Add focus trap in CommandPalette useEffect (when isOpen): capture Tab/Shift+Tab, cycle within focusable elements, and restore focus to trigger on close."
+    },
+    {
+      "severity": "medium",
+      "file_line": "frontend/src/components/ui.tsx:689-768 (NotificationDropdown) & frontend/src/components/Layout.tsx:188,206",
+      "title": "NotificationDropdown onClick error leaves dropdown open",
+      "why": "NotificationDropdown item onClick handler: onClick={() => { item.onClick?.(); setOpen(false); }}. If item.onClick() throws, setOpen(false) never executes, leaving the dropdown stuck open.",
+      "evidence": "ui.tsx line 748: onClick={() => { item.onClick?.(); setOpen(false); }}. Layout.tsx passes notifItems with onClick that mutates state (line 118-119).",
+      "fix": "Wrap in try/finally: onClick={() => { try { item.onClick?.(); } finally { setOpen(false); } }}"
+    },
+    {
+      "severity": "medium",
+      "file_line": "frontend/src/components/ui.tsx:168-297 (Select component)",
+      "title": "Select popover position not updated on scroll/resize — dropdown detaches from trigger",
+      "why": "Select calculates popover position once on open using trigger.getBoundingClientRect() and sets CSS variables (--st, --sl). The popover uses position:fixed. If user scrolls the page while the dropdown is open, the trigger moves but the popover stays fixed, visually detaching.",
+      "evidence": "ui.tsx lines 270-280: const r = trigger.getBoundingClientRect(); style={{ '--st': `${r.bottom}px`, '--sl': `${r.left}px` }}. No scroll/resize listener to recompute.",
+      "fix": "Add a scroll/resize listener on window/document when open that recomputes position, or close the dropdown on scroll (simpler)."
+    },
+    {
+      "severity": "low",
+      "file_line": "frontend/src/pages/Assets.tsx:86-95 (submit payload)",
+      "title": "Asset create sends location_id as undefined when empty — backend expects valid UUID",
+      "why": "CreateAssetInput requires LocationID (valid UUID). Frontend payload: location_id: form.location_id || undefined. If user somehow bypasses required validation (see high finding #1), empty string becomes undefined → JSON omits key → Go decoder sets empty string → validation fails with RELASI_TIDAK_VALID.",
+      "evidence": "Assets.tsx line 90: location_id: form.location_id || undefined. biz.go CreateAssetInput line 205: LocationID string `json:\"location_id\"` — required by service validation line 210: if !model.IsUUID(in.LocationID) return RELASI_TIDAK_VALID.",
+      "fix": "Keep the required validation fix from finding #1. Additionally, ensure form.location_id defaults to a valid UUID or show clear error before submit."
+    },
+    {
+      "severity": "low",
+      "file_line": "backend/internal/service/biz.go:220-230 (UpdateAssetInput) & frontend/src/pages/Assets.tsx:90",
+      "title": "Asset update API does not support location change — frontend sends location_id but backend ignores it",
+      "why": "UpdateAssetInput (biz.go line 220) has fields: Nama, SerialNumber, CategoryID, PurchaseDate, Catatan — no LocationID. Frontend submit payload includes location_id: undefined (line 90). Backend ignores it. Users cannot move an asset to a different location via edit; they must use the separate Mutasi (movement) flow.",
+      "evidence": "biz.go lines 220-227: type UpdateAssetInput struct { Nama, SerialNumber, CategoryID, PurchaseDate, Catatan }. Assets.tsx line 90 includes location_id but it's not in backend input.",
+      "fix": "If location change on edit is desired, add LocationID to UpdateAssetInput and UpdateMeta repo call. If intentional, remove location_id from frontend payload to avoid confusion."
+    },
+    {
+      "severity": "low",
+      "file_line": "frontend/src/auth.tsx:78-115 (refreshAccessToken) & frontend/src/api.ts:100-120 (apiFetch 401 handling)",
+      "title": "Auth refresh: expired access token sent in Authorization header on refresh call — harmless but wasteful",
+      "why": "refreshAccessToken() calls apiFetch('/api/v1/auth/refresh', { method: 'POST' }). apiFetch adds Authorization: Bearer <expired_token> because accessToken is still in memory. Backend /auth/refresh is public (no auth middleware) and reads cookie only, so the header is ignored. No functional bug, but sends unnecessary header.",
+      "evidence": "auth.tsx line 83: await apiFetch('/api/v1/auth/refresh', { method: 'POST' }). api.ts line 48: if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`. routes.go: /auth/refresh in public group.",
+      "fix": "In refreshAccessToken, call fetch directly without apiFetch wrapper, or temporarily clear accessToken before the call."
+    },
+    {
+      "severity": "low",
+      "file_line": "frontend/src/components/ui.tsx:429-503 (Modal) & frontend/src/pages/Assets.tsx:218",
+      "title": "Modal focus management: first focusable element may be hidden proxy input",
+      "why": "Modal useEffect (line 450) queries for first focusable: '.modal-body input:not(.select-proxy), .modal-body .select-trigger, ...'. It correctly excludes .select-proxy. Good. But if the first field is a Select, it focuses the .select-trigger (button), not the proxy input. This is correct behavior.",
+      "evidence": "ui.tsx line 450: querySelector excludes .select-proxy. Verified working as intended.",
+      "fix": "No fix needed — confirmed correct."
+    }
+  ]
+}

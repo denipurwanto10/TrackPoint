@@ -1,0 +1,233 @@
+{
+  "findings": [
+    {
+      "severity": "critical",
+      "file_line": "internal/service/maintenance.go:59-91 (Report), 142-147 (Transition DONE), 150-165 (Transition error handling)",
+      "title": "Cancelled maintenance ticket leaves asset permanently IN_MAINTENANCE with lost holder",
+      "why": "Report() sets asset to IN_MAINTENANCE and clears holder (line 74-77). Transition() on DONE restores asset status via returnTo (line 144). But CANCELLED path (lines 134-136, 161-163) has no asset status restoration. MoveAsset() rejects IN_MAINTENANCE assets (biz.go:154). No other endpoint changes asset status. Result: after CANCELLED, asset stuck IN_MAINTENANCE, holder lost, unrecoverable without creating a new ticket.",
+      "evidence": "Report: repo.ApplyAssetMove(ctx, tx, assetID, model.AssetMaintenance, a.LocationID, nil) // holder cleared\nTransition DONE: assetHolderForReturn(in.ReturnTo, tech) // may set holder to tech\nTransition CANCELLED: no ApplyAssetMove call",
+      "fix": "In Transition(), add asset restoration for CANCELLED: when to == MntCancelled, call ApplyAssetMove with return_to = AVAILABLE (or original location/holder from movement history). Also store original holder/location on Report to restore on cancel."
+    },
+    {
+      "severity": "critical",
+      "file_line": "internal/api/handlers.go:71-81 (Refresh)",
+      "title": "Concurrent refresh race: losing request clears cookie, logs out user even when parallel request succeeded",
+      "why": "handlers.Refresh calls clearRefreshCookie(c, d.Cfg) on ANY error (line 75), including SESI_DIPUTAR (rotation conflict). With single-flight frontend, two tabs calling refresh simultaneously: tab A wins, sets new cookie; tab B loses, gets SESI_DIPUTAR, clears the cookie just set by tab A. User is logged out on all tabs.",
+      "evidence": "handlers.go:75: clearRefreshCookie(c, d.Cfg) // called before fail(c, aerr)\nService Refresh returns apperr.Unauthorized(\"SESI_DIPUTAR\", ...) on repo.ErrRotateConflict",
+      "fix": "Only clear cookie on auth failure (expired, revoked, invalid), not on SESI_DIPUTAR. Change handlers.Refresh to: if aerr != nil { if aerr.Code != \"SESI_DIPUTAR\" { clearRefreshCookie(...) } fail(c, aerr); return }"
+    },
+    {
+      "severity": "high",
+      "file_line": "internal/service/biz.go:25-31 (AssetService.List), 239-245 (MasterService.Categories), 289-295 (MasterService.Locations), 440-448 (DashboardService.Get)",
+      "title": "Malformed query parameters (e.g. ?category_id=notauuid) return 500 instead of 400",
+      "why": "Service layer catches repo errors and unconditionally returns apperr.Internal(). Repo returns pgx error 22P02 (invalid text representation). apperr.FromPG maps 22P02 to BadRequest (apperr.go:43-44), but service never calls it — returns Internal directly.",
+      "evidence": "biz.go:28: return nil, model.PageMeta{}, apperr.Internal() // no FromPG call\nbiz.go:242: return nil, apperr.Internal()\nbiz.go:292: return nil, apperr.Internal()\nbiz.go:443: return nil, apperr.Internal()",
+      "fix": "In each List/Get method, replace `return nil, ..., apperr.Internal()` with `return nil, ..., apperr.FromPG(err, \"resource\")` to propagate correct 4xx status for client errors."
+    },
+    {
+      "severity": "high",
+      "file_line": "internal/service/maintenance.go:126-132 (Transition DONE validation)",
+      "title": "biaya (cost) on DONE transition not validated non-negative; accepts negative/NaN values",
+      "why": "ProgressInput.Biaya is *float64. Transition checks strings but not numeric sign. Negative biaya passes validation; Postgres NUMERIC(14,2) stores it. No business rule prevents negative cost.",
+      "evidence": "maintenance.go:127-130 validates Tindakan/ReturnTo but not Biaya.\nUpdateMaintenanceStatus passes biaya directly to SQL.",
+      "fix": "Add: if in.Biaya != nil && *in.Biaya < 0 { return nil, apperr.BadRequest(\"BIAYA_NEGATIF\", \"Biaya tidak boleh negatif.\") }"
+    },
+    {
+      "severity": "high",
+      "file_line": "internal/service/maintenance.go:119-125, 144 (Transition technician assignment)",
+      "title": "Technician assignment on DONE not validated as active TEKNISI/ADMIN; asset holder becomes arbitrary user",
+      "why": "Transition sets technician_id = coalesceStr(m.TechnicianID, u.ID) (line 121) — on REPORTED→DONE (not allowed) or if IN_PROGRESS tech was set by another user, tech could be any UUID. On DONE with ReturnTo=ASSIGNED, assetHolderForReturn returns &tech (line 204-208), making that user the asset holder. No validation that tech is active and role in (TEKNISI, ADMIN).",
+      "evidence": "line 144: assetHolderForReturn(in.ReturnTo, tech)\nassetHolderForReturn returns &tech when returnTo==ASSIGNED\nrepo.ApplyAssetMove sets holder_id = tech",
+      "fix": "In Transition(), when to==MntDone and returnTo==ReturnAssigned, validate tech exists, is_active, and role in (TEKNISI, ADMIN) via repo.FindUserByID. Return 400/403 if not."
+    },
+    {
+      "severity": "high",
+      "file_line": "internal/service/biz.go:385-427 (UserService.Update)",
+      "title": "PATCH /users/:id silently reactivates deactivated user if is_active omitted",
+      "why": "Update() defaults active=true (line 393) and only overrides if in.IsActive != nil. A partial update with just nama+role reactivates the user. The revoke-all-sessions logic (line 420) only runs when active=false, so reactivation doesn't re-issue sessions. Stale revoked sessions remain revoked; user can login anew but existing revoked tokens stay revoked — minor. But unintended reactivation is a bug.",
+      "evidence": "biz.go:393: active := true\nbiz.go:412-420: if !active { revoke sessions }\nPATCH without is_active → active stays true → no revoke → user reactivated",
+      "fix": "Require explicit is_active in update payload, or treat omitted is_active as 'no change' by fetching current user first and preserving their active state."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/service/auth.go:102, 110, 152 (Revokes on reuse/expired)",
+      "title": "Reuse detection revokes ALL user sessions, including the legitimate rotated session",
+      "why": "On token reuse (row.RevokedAt != nil or row.Expired), Refresh calls RevokeAllUserSessions (lines 102, 110). If the user had a valid rotated session from a concurrent legitimate refresh, it is also revoked. Standard behavior but could be improved to only revoke sessions created after the compromised token.",
+      "evidence": "auth.go:100-103: if row.Expired || row.RevokedAt != nil { _ = repo.RevokeAllUserSessions(...) }\nauth.go:109-111: if !u.IsActive { _ = repo.RevokeAllUserSessions(...) }",
+      "fix": "Optional improvement: track token family via replaced_by chain; only revoke descendants of the compromised token. Acceptable as-is for most threat models."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/service/maintenance.go:186-200 (assetLoc function)",
+      "title": "assetLoc swallows errors, returns empty string; on DONE causes confusing 400",
+      "why": "assetLoc does a plain SELECT without FOR UPDATE; on error (e.g., asset deleted) returns \"\" silently. Transition DONE passes this to ApplyAssetMove, which tries UPDATE assets SET ... location_id='' — Postgres 22P02 (invalid UUID) → apperr.BadRequest(\"FORMAT_ID_SALAH\") instead of a meaningful error.",
+      "evidence": "maintenance.go:188-200: if err != nil { return \"\" }\nline 144: assetLoc(ctx, tx, m.AssetID) passed to ApplyAssetMove",
+      "fix": "Return error from assetLoc; propagate in Transition. Or remove assetLoc entirely — asset location hasn't changed during ticket (Move blocked for IN_MAINTENANCE), so use m's original location from the ticket (but it only has asset_code). Better: read location in GetMaintenanceForUpdate SELECT (already joined) and pass it along."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/service/biz.go:129-203 (AssetService.Move)",
+      "title": "Move allows setting holder to any UUID without verifying user is active and role in (KARYAWAN, TEKNISI, ADMIN)",
+      "why": "Line 160-170 checks repo.FindUserByID and u.IsActive, but does NOT validate role. A holder could be set to a DEVELOPER role (if one existed) or any future role. Current roles are only 3, but schema enum is extensible. Defensive validation missing.",
+      "evidence": "biz.go:160-167: FindUserByID, check IsActive, no role check.",
+      "fix": "Add: if !model.ValidRole(u.Role) { return errHolderInactive } // or new error"
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/service/maintenance.go:116-125 (Transition IN_PROGRESS technician assignment)",
+      "title": "Transition to IN_PROGRESS ignores new TechnicianID if ticket already has one (coalesce keeps old)",
+      "why": "line 121: tech = coalesceStr(m.TechnicianID, u.ID). If m.TechnicianID already set (e.g., from a previous IN_PROGRESS transition by another tech), the new tech_id is silently ignored. No error returned to caller.",
+      "evidence": "coalesceStr returns first non-empty; UpdateMaintenanceStatus uses coalesce(technician_id, $2) which keeps existing.",
+      "fix": "If to==MntInProgress and m.TechnicianID != \"\" and in.TechnicianID != \"\" and in.TechnicianID != m.TechnicianID, return error: \"Teknisi sudah ditetapkan, tidak bisa diubah tanpa cancel dulu.\""
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/mw/mw.go:30-35 (Auth middleware)",
+      "title": "String comparison err.Error() == \"expired\" is fragile; should use errors.Is",
+      "why": "auth.ParseAccessToken returns errors.New(\"expired\") (auth.go:79-80). mw.Auth compares error message string. If error message changes, expired tokens get generic 401 instead of specific SESI_KEDALUWARSA. Use sentinel errors or errors.Is.",
+      "evidence": "auth.go:80: return nil, errors.New(\"expired\")\nmw.go:31: if err.Error() == \"expired\" { ... }",
+      "fix": "Return a sentinel error from auth (e.g., ErrTokenExpired) and use errors.Is(err, auth.ErrTokenExpired) in middleware."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/service/auth.go:420 (UserService.Update revokes before update)",
+      "title": "Sessions revoked before user update; if update fails, sessions already gone",
+      "why": "Line 420: _ = repo.RevokeAllUserSessions(ctx, s.db, id) runs BEFORE repo.UpdateUser. If UpdateUser then fails (e.g., DB error, constraint), the user's sessions are already revoked but the user record unchanged. User logged out unexpectedly.",
+      "evidence": "biz.go:412-422: revoke happens at line 420; UpdateUser at line 422.",
+      "fix": "Move revoke call after successful UpdateUser, or do both in a transaction."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/repo/assets.go:543-551 (itoa2)",
+      "title": "itoa2 produces invalid placeholder for n >= 100 (e.g., \":\" for 100)",
+      "why": "itoa2 for n=100 returns string(rune('0'+10)) = ':' and string(rune('0'+0)) = '0' → \":0\". Not currently reachable (max args ~7), but latent bug if queries grow. Should use strconv.Itoa.",
+      "evidence": "assets.go:543-551: if n < 10 { return string(rune('0'+n)) } else { return string(rune('0'+n/10)) + string(rune('0'+n%10)) }",
+      "fix": "Replace with: import \"strconv\"; return strconv.Itoa(n)"
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/api/handlers.go:215-227 (ListMovements), internal/repo/assets.go:201-231 (ListMovements)",
+      "title": "ListMovements endpoint has no authorization; any authenticated user sees full movement history of any asset",
+      "why": "GET /assets/:id/movements only checks UUID format. No role or ownership check. Karyawan can see movements of assets they don't hold. May leak holder names, location names, serial numbers, correction reasons.",
+      "evidence": "handlers.go:215-227: no role check, no ownership check.\nrepo.ListMovements joins users and locations exposing names.",
+      "fix": "Add authorization: karyawan should only see movements for assets they currently hold or held (from_holder_id or to_holder_id == u.ID)."
+    },
+    {
+      "severity": "medium",
+      "file_line": "internal/mw/mw.go:82-108 (CheckOrigin)",
+      "title": "CheckOrigin referer check allows subdomain bypass when Origin header absent",
+      "why": "refStartsWith(ref, origin) uses strings.HasPrefix(ref, trimSuffix(origin, \"/\")). If origin=\"https://app.example.com\", referer=\"https://app.example.com.evil.com/path\" → HasPrefix true → allowed. Origin header is usually present on cross-origin POST, but missing on some navigations.",
+      "evidence": "mw.go:94: if origin == \"\" && ref != \"\" && !refStartsWith(ref, cfg.CORSOrigin) { abort }\nmw.go:106-108: refStartsWith uses HasPrefix with trimmed origin.",
+      "fix": "Use exact origin match for referer too, or parse referer URL and compare host exactly. Or rely only on Origin header (standard for CSRF)."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/repo/assets.go:127-138 (CreateAsset) + internal/service/biz.go:67-87 (AssetService.Create)",
+      "title": "AssetService.Create dereferences out.ID after withTx; safe now but fragile if closure changes",
+      "why": "withTx closure sets out = a only on success path. If future change adds early return without setting out but still returns nil error, out would be nil. Current code: repo.CreateAsset returns non-nil *model.Asset on success, so out is non-nil. Not a bug today, but defensive nil check recommended.",
+      "evidence": "biz.go:77: out = a\nbiz.go:83: repo.GetAsset(ctx, s.db, out.ID) // out guaranteed non-nil if err==nil",
+      "fix": "Add guard: if out == nil { return nil, apperr.Internal() } after withTx, or restructure to return from closure."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/auth/auth.go:56-60 (Login dummy hash timing)",
+      "title": "Login does not run dummy bcrypt for unknown email, enabling user enumeration via timing",
+      "why": "Line 58: if err != nil || !auth.CheckPassword(...) — short-circuits on err (FindUserByEmail returned error), so CheckPassword not called. Unknown email takes different code path (no bcrypt) vs known email with wrong password (bcrypt runs). Difference is microseconds but measurable.",
+      "evidence": "auth.go:58: if err != nil || !auth.CheckPassword(hashOf(u), password)",
+      "fix": "Always call CheckPassword: move dummy hash call before the condition, or restructure: found := err == nil; if found { ... } else { _ = bcrypt.CompareHashAndPassword(dummyHash, ...) }; if !found || !ok { return unauthorized }"
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/repo/repo.go:114-112 (CreateUser), internal/service/biz.go:365-383 (UserService.Create)",
+      "title": "CreateUser allows duplicate email race (check-then-insert); unique index catches it but maps to 409 with generic message",
+      "why": "No explicit uniqueness check before insert. Relies on DB unique index (users_email_lower_key) → 23505 → apperr.FromPG → Conflict(\"DUPLICATE_DATA\", \"pengguna sudah terdaftar.\"). Correct behavior but extra roundtrip. Acceptable.",
+      "evidence": "repo.go:104-112: direct INSERT\napperr.go:37-38: 23505 → Conflict",
+      "fix": "Optional: add SELECT EXISTS before insert for clearer 400. Current behavior is correct."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/db/db.go:20 (MaxIdleConn field unused)",
+      "title": "Config.MaxIdleConn documented as unused because pgxpool v5 lacks knob; comment says so but field remains",
+      "why": "Struct field exists and is in DefaultConfig but NewPool never uses it (line 34-35 comment). Minor API surface bloat.",
+      "evidence": "db.go:20: MaxIdleConn int // tanpa padanan di pgxpool v5\nNewPool: only sets MaxConns and MaxConnIdleTime",
+      "fix": "Remove MaxIdleConn from Config and DefaultConfig, or implement MinIdleConns if needed."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/service/biz.go:206-209 (errSentinel usage)",
+      "title": "Sentinel errors use string type; no errors.Is support; switch on value works but errors.Is(err, sentinel) would fail",
+      "why": "errSentinel returns sentinel(string). sentinel implements Error() but not errors.Is target. Current code uses switch err { case errMaintenanceLock: } which works by identity. If future code uses errors.Is, it will fail. Not a bug today, but limits interoperability.",
+      "evidence": "biz.go:211-214: type sentinel string; func (s sentinel) Error() string { return string(s) }\nNo Is method.",
+      "fix": "Optional: implement func (s sentinel) Is(target error) bool { _, ok := target.(sentinel); return ok && target == s } or keep switch-based handling."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/service/maintenance.go:186-200 (assetLoc) and internal/service/maintenance.go:144",
+      "title": "assetLoc reads location without FOR UPDATE; if concurrent Move (though blocked) could cause stale read",
+      "why": "assetLoc does plain SELECT. Transition DONE passes result to ApplyAssetMove. Move is blocked for IN_MAINTENANCE assets, so location can't change during open ticket. Safe currently, but unnecessary query since location is immutable during ticket lifetime. Could be removed and replaced with m.AssetLocation from SELECT (not currently selected).",
+      "evidence": "maintenance.go:144: assetLoc(ctx, tx, m.AssetID)\n186-200: plain SELECT, no FOR UPDATE.",
+      "fix": "Extend GetMaintenanceForUpdate SELECT to include a.location_id, then use m.LocationID in Transition. Remove assetLoc."
+    },
+    {
+      "severity": "low",
+      "file_line": "cmd/seed/main.go:107-116 (randomPassword)",
+      "title": "randomPassword has modulo bias (256 % 56 = 32)",
+      "why": "Alphabet length 56. rand.Read 256 values. Values 0-31 have one extra mapping (5 times) vs 32-55 (4 times). Slight bias toward first 32 chars. Not security-critical for admin seed.",
+      "evidence": "seed.go:112-113: b[i] = adminAlphabet[int(b[i])%len(adminAlphabet)]",
+      "fix": "Use rejection sampling: if b[i] >= 256 - (256 % len(alphabet)) { retry } or use crypto/rand with base64 and filter."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/repo/assets.go:341-348 (CreateMaintenance)",
+      "title": "CreateMaintenance inserts without explicit transaction isolation; unique index prevents duplicate open tickets but error message is generic",
+      "why": "Repo inserts maintenance record; partial unique index causes 23505 on concurrent Report. FromPG maps 23505 → Conflict(\"DUPLICATE_DATA\", \"tiket sudah terdaftar.\"). Message refers to resource \"tiket\" but conflict is asset-level (one open ticket per asset). Slightly misleading but acceptable.",
+      "evidence": "assets.go:341-348: INSERT ... RETURNING id\napperr.go:37-38: 23505 → Conflict",
+      "fix": "Optional: check for existing open ticket before insert for friendlier message; current behavior correct."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/api/handlers.go:461-471 (AdminRevokeSession)",
+      "title": "AdminRevokeSession returns 200 OK even if session ID doesn't exist",
+      "why": "handler calls repo.RevokeSession without checking affected rows. If ID not found, Exec returns 0 rows affected but no error. Returns 200 {\"ok\": true}. Should return 404.",
+      "evidence": "handlers.go:466: if err := repo.RevokeSession(...) ...\nrepo.go:471-474: UPDATE ... WHERE id=$1 — no row check.",
+      "fix": "Check rows affected in repo.RevokeSession; return ErrNoRows if 0; handler maps to 404."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/service/biz.go:440-481 (DashboardService.Get)",
+      "title": "Dashboard errors for karyawan-specific counts are silently ignored",
+      "why": "Lines 460-468: repo.CountMyAssets, CountMyOpenTickets, RecentMovements, OpenTicketsForAction errors assigned to _ and ignored. If DB error, dashboard returns partial data with zero counts.",
+      "evidence": "biz.go:460: d.MyAssets, _ = repo.CountMyAssets(...)\n463: if merr == nil { d.RecentMoves = moves } // else empty",
+      "fix": "Return error from DashboardService.Get if any sub-query fails, or at least log. Current fail-open is a UX choice but hides issues."
+    },
+    {
+      "severity": "low",
+      "file_line": "internal/repo/assets.go:166-172 (ApplyAssetMove)",
+      "title": "ApplyAssetMove does not enforce CHECK constraint assets_status_holder_check at application level; relies on DB",
+      "why": "ApplyAssetMove UPDATE sets status, location_id, holder_id directly. DB CHECK enforces (status='ASSIGNED') = (holder_id IS NOT NULL). If caller passes inconsistent pair (e.g., status=AVAILABLE, holder_id=non-null), DB rejects with 23514 → Unprocessable(\"ATURAN_DILANGGAR\", ...). Works but application could validate earlier for better UX.",
+      "evidence": "assets.go:169: UPDATE assets SET status=$2, location_id=$3, holder_id=$4 WHERE id=$1\nmigration line 68-70: CHECK ((status = 'ASSIGNED') = (holder_id IS NOT NULL))",
+      "fix": "Optional: add validation in AssetService.Move and MaintenanceService.Report/Transition before calling ApplyAssetMove. Current DB-enforced is correct."
+    }
+  ],
+  "layers_audited": [
+    "internal/repo/assets.go — all asset, movement, maintenance, refresh session queries",
+    "internal/repo/repo.go — user, category, location queries",
+    "internal/service/biz.go — AssetService, MasterService, UserService, DashboardService",
+    "internal/service/auth.go — Login, Refresh, Logout, token rotation",
+    "internal/service/maintenance.go — Report, Transition, state machine",
+    "internal/auth/auth.go — bcrypt, JWT HS256, refresh token SHA-256",
+    "internal/apperr/apperr.go — PG error mapping",
+    "internal/model/model.go — domain types, validation, transitions",
+    "internal/mw/mw.go — JWT auth, RBAC, origin check",
+    "internal/api/handlers.go — all HTTP handlers",
+    "internal/api/cookie.go — refresh cookie HttpOnly/Secure/SameSite",
+    "internal/server/routes.go — routing with RBAC groups",
+    "internal/server/server.go — Gin setup, CORS, health/ready",
+    "internal/config/config.go — env loading & validation",
+    "internal/db/db.go — pgxpool creation, masking",
+    "cmd/api/main.go — server bootstrap, graceful shutdown",
+    "cmd/seed/main.go — idempotent admin seed",
+    "internal/testdb/testdb.go — test DB guard",
+    "migrations/00001_init.sql — schema, enums, constraints, indexes"
+  ]
+}
