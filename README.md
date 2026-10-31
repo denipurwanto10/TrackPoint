@@ -1,4 +1,4 @@
-# TrackPoint — IT Asset & Maintenance Management (lokal)
+# TrackPoint — IT Asset & Maintenance Management (lokal) 
  
 Aplikasi web lokal untuk kelola aset IT: aset, lokasi, penanggung jawab, histori mutasi, dan maintenance. Sepenuhnya berjalan di `localhost` Windows. Tanpa cloud, tanpa API key, tanpa biaya berlangganan.
 
