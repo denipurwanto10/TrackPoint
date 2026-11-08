@@ -1,7 +1,7 @@
 # TrackPoint — IT Asset & Maintenance Management (lokal) 
  
 Aplikasi web lokal untuk kelola aset IT: aset, lokasi, penanggung jawab, histori mutasi, dan maintenance. Sepenuhnya berjalan di `localhost` Windows. Tanpa cloud, tanpa API key, tanpa biaya berlangganan.
-
+ 
 ## Status
 
 Backend lengkap: auth (login/refresh rotation + reuse detection/logout, cookie HttpOnly `tp_refresh`), RBAC ADMIN/TEKNISI/KARYAWAN di tiap endpoint, dashboard agregat dari DB, CRUD aset (kode `TRK-000001` via `asset_code_seq`, mutasi transaksional append-only), maintenance (REPORTED→IN_PROGRESS→DONE/CANCELLED), users + master kategori/lokasi. Frontend lengkap: login, dashboard, aset + mutasi, maintenance, sesi saya, master (ADMIN), pengguna (ADMIN). Guard `trackpoint_test` aktif; kontrak JSON snake_case, login+refresh sama-sama `access_token`.
